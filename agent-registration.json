@@ -1,0 +1,18 @@
+{
+  "type": "Agent",
+  "name": "Sendo",
+  "description": "Telegram-based stablecoin bill-pay and remittance agent for Nigerian users, settling in cNGN on Celo with fee abstraction so users never need to hold CELO.",
+  "image": "",
+  "endpoints": [
+    {
+      "type": "wallet",
+      "address": "0x6e4ebDbFb8D30E3C2439d8aD1dc7B23EDA1C440f",
+      "chainId": 42220
+    },
+    {
+      "type": "a2a",
+      "url": "https://github.com/Mandicrypt/Sendo"
+    }
+  ],
+  "supportedTrust": ["reputation"]
+}
