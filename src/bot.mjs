@@ -4,6 +4,7 @@ import { walletForTelegramUser } from './wallet.mjs';
 import { getCngnBalance, sendCngn } from './celo.mjs';
 import { buyAirtime, verifyMeter, payElectricity } from './vtpass.mjs';
 import { TREASURY_WALLET_ID } from './config.mjs';
+import { setUsername, resolveUsername, getUsernameFor } from './usernames.mjs';
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   throw new Error('Set TELEGRAM_BOT_TOKEN in your .env file — get one from @BotFather.');
@@ -11,21 +12,63 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
+// Every money-moving command builds an "action" here instead of running
+// immediately. Nothing actually happens until the user sends /confirm.
+// Keyed per Telegram user, one pending action at a time, expires after a
+// few minutes so a stale, forgotten confirmation can't fire by surprise.
+const pendingActions = new Map();
+const CONFIRMATION_WINDOW_MS = 2 * 60 * 1000;
+
+function setPending(telegramUserId, action) {
+  pendingActions.set(telegramUserId, { ...action, expiresAt: Date.now() + CONFIRMATION_WINDOW_MS });
+}
+
+function getPending(telegramUserId) {
+  const pending = pendingActions.get(telegramUserId);
+  if (!pending) return null;
+  if (Date.now() > pending.expiresAt) {
+    pendingActions.delete(telegramUserId);
+    return null;
+  }
+  return pending;
+}
+
+// Resolves a recipient the user typed — either a raw 0x address or an
+// @username registered via /setusername — into an actual address.
+function resolveRecipient(target) {
+  if (target.startsWith('0x')) {
+    return { address: target, label: target };
+  }
+  const ownerTelegramId = resolveUsername(target);
+  if (!ownerTelegramId) {
+    return null;
+  }
+  const account = walletForTelegramUser(ownerTelegramId);
+  return { address: account.address, label: '@' + target.replace(/^@/, '') };
+}
+
 bot.start((ctx) => {
   ctx.reply(
     "Welcome to Sendo — send and receive cNGN right here in Telegram, no CELO required for gas.\n\n" +
     'Commands:\n' +
     '/wallet — see your Sendo wallet address\n' +
     '/balance — check your cNGN balance\n' +
-    '/send <address> <amount> — send cNGN to another address\n' +
+    '/setusername <name> — pick a username so others can send to you by name\n' +
+    '/send <address or @username> <amount> — send cNGN\n' +
     '/airtime <network> <phone> <amount> — top up airtime (mtn, glo, airtel, 9mobile)\n' +
-    '/bill <disco> <prepaid|postpaid> <meter> <amount> <phone> — pay an electricity bill'
+    '/bill <disco> <prepaid|postpaid> <meter> <amount> <phone> — pay an electricity bill\n\n' +
+    'Every send, top-up, or bill payment asks for /confirm before anything moves.'
   );
 });
 
 bot.command('wallet', (ctx) => {
   const account = walletForTelegramUser(ctx.from.id);
-  ctx.reply(`Your Sendo wallet address:\n${account.address}\n\nFund this with cNGN to start sending.`);
+  const username = getUsernameFor(ctx.from.id);
+  ctx.reply(
+    `Your Sendo wallet address:\n${account.address}\n` +
+    (username ? `Your username: @${username}\n` : 'You haven\'t set a username yet — try /setusername\n') +
+    '\nFund this with cNGN to start sending.'
+  );
 });
 
 bot.command('balance', async (ctx) => {
@@ -39,31 +82,54 @@ bot.command('balance', async (ctx) => {
   }
 });
 
-bot.command('send', async (ctx) => {
+bot.command('setusername', (ctx) => {
   const parts = ctx.message.text.split(' ').filter(Boolean);
-  const [, toAddress, amount] = parts;
+  const [, requested] = parts;
 
-  if (!toAddress || !amount || !toAddress.startsWith('0x')) {
-    ctx.reply('Usage: /send <address> <amount>\nExample: /send 0xabc123... 500');
+  if (!requested) {
+    ctx.reply('Usage: /setusername <name>\nExample: /setusername chinedu_o\n(lowercase letters, numbers, underscores — 3-20 characters)');
     return;
   }
 
-  const account = walletForTelegramUser(ctx.from.id);
-  ctx.reply(`Sending ${amount} cNGN to ${toAddress}...`);
-
   try {
-    const { hash } = await sendCngn({ account, toAddress, amount });
-    ctx.reply(`✅ Sent! Transaction: https://celoscan.io/tx/${hash}`);
+    const username = setUsername(ctx.from.id, requested);
+    ctx.reply(`✅ You're now @${username}. Others can send to you with /send @${username} <amount>.`);
   } catch (err) {
-    console.error(err);
-    ctx.reply(
-      "That didn't go through — make sure your wallet has enough cNGN " +
-      '(and check /balance). Error: ' + err.message
-    );
+    ctx.reply(err.message);
   }
 });
 
-bot.command('airtime', async (ctx) => {
+bot.command('cancel', (ctx) => {
+  if (pendingActions.delete(ctx.from.id)) {
+    ctx.reply('Cancelled — nothing was sent.');
+  } else {
+    ctx.reply('Nothing pending to cancel.');
+  }
+});
+
+bot.command('send', (ctx) => {
+  const parts = ctx.message.text.split(' ').filter(Boolean);
+  const [, target, amount] = parts;
+
+  if (!target || !amount) {
+    ctx.reply('Usage: /send <address or @username> <amount>\nExample: /send @chinedu_o 500');
+    return;
+  }
+
+  const recipient = resolveRecipient(target);
+  if (!recipient) {
+    ctx.reply(`Couldn't find a user called "${target}" — check the spelling, or use their full wallet address instead.`);
+    return;
+  }
+
+  setPending(ctx.from.id, { type: 'send', toAddress: recipient.address, amount });
+  ctx.reply(
+    `Confirm: send ${amount} cNGN to ${recipient.label}?\n` +
+    'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
+  );
+});
+
+bot.command('airtime', (ctx) => {
   const parts = ctx.message.text.split(' ').filter(Boolean);
   const [, network, phone, amount] = parts;
 
@@ -72,46 +138,11 @@ bot.command('airtime', async (ctx) => {
     return;
   }
 
-  const account = walletForTelegramUser(ctx.from.id);
-  const treasury = walletForTelegramUser(TREASURY_WALLET_ID);
-
-  ctx.reply(`Moving ${amount} cNGN to cover this top-up...`);
-
-  // Step 1: move the user's cNGN into Sendo's treasury wallet on-chain.
-  // This is the real, tagged, on-chain transaction that counts toward
-  // the hackathon's Value Moved metrics.
-  let onChainResult;
-  try {
-    onChainResult = await sendCngn({ account, toAddress: treasury.address, amount });
-  } catch (err) {
-    console.error(err);
-    ctx.reply(
-      "Couldn't move the funds — make sure your wallet has enough cNGN " +
-      '(and check /balance). Error: ' + err.message
-    );
-    return;
-  }
-
-  ctx.reply(`Payment received on-chain. Buying ${network} airtime for ${phone}...`);
-
-  // Step 2: fulfill the actual airtime purchase through VTpass, paid from
-  // Sendo's own VTpass Naira balance — this part never touches crypto.
-  try {
-    const result = await buyAirtime({ network, phone, amount });
-    ctx.reply(
-      `✅ Airtime delivered!\n` +
-      `Status: ${result.status}\n` +
-      `Reference: ${result.transactionId}\n` +
-      `On-chain payment: https://celoscan.io/tx/${onChainResult.hash}`
-    );
-  } catch (err) {
-    console.error(err);
-    ctx.reply(
-      'Your cNGN payment went through on-chain, but the airtime purchase itself failed: ' +
-      err.message +
-      '\n\nThis needs a manual refund for now — that flow isn\'t built yet.'
-    );
-  }
+  setPending(ctx.from.id, { type: 'airtime', network, phone, amount });
+  ctx.reply(
+    `Confirm: buy ${amount} cNGN worth of ${network} airtime for ${phone}?\n` +
+    'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
+  );
 });
 
 bot.command('bill', async (ctx) => {
@@ -131,10 +162,9 @@ bot.command('bill', async (ctx) => {
     return;
   }
 
-  // Step 1: verify the meter BEFORE touching any money. This is the safety
-  // check that /airtime doesn't need but bill payment does — a mistyped
-  // meter number means paying for a stranger's electricity, with no way
-  // to get that money back.
+  // Verifying the meter happens here, up front — before we even ask for
+  // confirmation — so the confirmation message can show the real customer
+  // name, not just the raw meter number the user typed.
   let meterInfo;
   try {
     meterInfo = await verifyMeter({ disco, meterNumber, meterType });
@@ -144,47 +174,113 @@ bot.command('bill', async (ctx) => {
     return;
   }
 
+  setPending(ctx.from.id, { type: 'bill', disco, meterType, meterNumber, amount, phone });
   ctx.reply(
-    `Meter verified: ${meterInfo.customerName}${meterInfo.customerAddress ? ' — ' + meterInfo.customerAddress : ''}\n` +
-    `Moving ${amount} cNGN to cover this bill...`
+    `Meter verified: ${meterInfo.customerName}${meterInfo.customerAddress ? ' — ' + meterInfo.customerAddress : ''}\n\n` +
+    `Confirm: pay ${amount} cNGN toward this bill?\n` +
+    'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
   );
+});
+
+bot.command('confirm', async (ctx) => {
+  const pending = getPending(ctx.from.id);
+  if (!pending) {
+    ctx.reply('Nothing pending to confirm — it may have expired. Start again with /send, /airtime, or /bill.');
+    return;
+  }
+  pendingActions.delete(ctx.from.id);
 
   const account = walletForTelegramUser(ctx.from.id);
-  const treasury = walletForTelegramUser(TREASURY_WALLET_ID);
 
-  // Step 2: now that we know who this meter belongs to, move the user's
-  // cNGN on-chain — same pattern as /airtime, tagged for the hackathon.
-  let onChainResult;
-  try {
-    onChainResult = await sendCngn({ account, toAddress: treasury.address, amount });
-  } catch (err) {
-    console.error(err);
-    ctx.reply(
-      "Couldn't move the funds — make sure your wallet has enough cNGN " +
-      '(and check /balance). Error: ' + err.message
-    );
+  if (pending.type === 'send') {
+    ctx.reply(`Sending ${pending.amount} cNGN...`);
+    try {
+      const { hash } = await sendCngn({ account, toAddress: pending.toAddress, amount: pending.amount });
+      ctx.reply(`✅ Sent! Transaction: https://celoscan.io/tx/${hash}`);
+    } catch (err) {
+      console.error(err);
+      ctx.reply(
+        "That didn't go through — make sure your wallet has enough cNGN " +
+        '(and check /balance). Error: ' + err.message
+      );
+    }
     return;
   }
 
-  ctx.reply('Payment received on-chain. Paying the electricity bill...');
+  const treasury = walletForTelegramUser(TREASURY_WALLET_ID);
 
-  // Step 3: fulfill the actual bill payment through VTpass.
-  try {
-    const result = await payElectricity({ disco, meterNumber, meterType, amount, phone });
-    ctx.reply(
-      `✅ Bill paid!\n` +
-      `Status: ${result.status}\n` +
-      (result.token ? `Token: ${result.token}\n` : '') +
-      `Reference: ${result.transactionId}\n` +
-      `On-chain payment: https://celoscan.io/tx/${onChainResult.hash}`
-    );
-  } catch (err) {
-    console.error(err);
-    ctx.reply(
-      'Your cNGN payment went through on-chain, but the bill payment itself failed: ' +
-      err.message +
-      '\n\nThis needs a manual refund for now — that flow isn\'t built yet.'
-    );
+  if (pending.type === 'airtime') {
+    ctx.reply(`Moving ${pending.amount} cNGN to cover this top-up...`);
+    let onChainResult;
+    try {
+      onChainResult = await sendCngn({ account, toAddress: treasury.address, amount: pending.amount });
+    } catch (err) {
+      console.error(err);
+      ctx.reply(
+        "Couldn't move the funds — make sure your wallet has enough cNGN " +
+        '(and check /balance). Error: ' + err.message
+      );
+      return;
+    }
+
+    ctx.reply(`Payment received on-chain. Buying ${pending.network} airtime for ${pending.phone}...`);
+    try {
+      const result = await buyAirtime({ network: pending.network, phone: pending.phone, amount: pending.amount });
+      ctx.reply(
+        `✅ Airtime delivered!\n` +
+        `Status: ${result.status}\n` +
+        `Reference: ${result.transactionId}\n` +
+        `On-chain payment: https://celoscan.io/tx/${onChainResult.hash}`
+      );
+    } catch (err) {
+      console.error(err);
+      ctx.reply(
+        'Your cNGN payment went through on-chain, but the airtime purchase itself failed: ' +
+        err.message +
+        '\n\nThis needs a manual refund for now — that flow isn\'t built yet.'
+      );
+    }
+    return;
+  }
+
+  if (pending.type === 'bill') {
+    ctx.reply(`Moving ${pending.amount} cNGN to cover this bill...`);
+    let onChainResult;
+    try {
+      onChainResult = await sendCngn({ account, toAddress: treasury.address, amount: pending.amount });
+    } catch (err) {
+      console.error(err);
+      ctx.reply(
+        "Couldn't move the funds — make sure your wallet has enough cNGN " +
+        '(and check /balance). Error: ' + err.message
+      );
+      return;
+    }
+
+    ctx.reply('Payment received on-chain. Paying the electricity bill...');
+    try {
+      const result = await payElectricity({
+        disco: pending.disco,
+        meterNumber: pending.meterNumber,
+        meterType: pending.meterType,
+        amount: pending.amount,
+        phone: pending.phone,
+      });
+      ctx.reply(
+        `✅ Bill paid!\n` +
+        `Status: ${result.status}\n` +
+        (result.token ? `Token: ${result.token}\n` : '') +
+        `Reference: ${result.transactionId}\n` +
+        `On-chain payment: https://celoscan.io/tx/${onChainResult.hash}`
+      );
+    } catch (err) {
+      console.error(err);
+      ctx.reply(
+        'Your cNGN payment went through on-chain, but the bill payment itself failed: ' +
+        err.message +
+        '\n\nThis needs a manual refund for now — that flow isn\'t built yet.'
+      );
+    }
   }
 });
 
