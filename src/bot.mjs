@@ -69,7 +69,7 @@ bot.start((ctx) => {
     '/send <address or @username> <amount> — send cNGN\n' +
     '/airtime <network> <phone> <amount> — top up airtime (mtn, glo, airtel, 9mobile)\n' +
     '/bill <disco> <prepaid|postpaid> <meter> <amount> <phone> — pay an electricity bill\n\n' +
-    'Or just type what you want in plain English — "send 500 to @chinedu", "buy 200 naira MTN airtime for 08011111111", "pay my ikeja light bill, 2000, meter 1111111111111".\n\n' +
+    'Or just type what you want in plain English — "send 500 to @chinedu", "buy 200 naira MTN airtime for 08011111111", "pay my ikeja light bill, 2000, meter 1111111111111", "set my username to chinedu_o".\n\n' +
     'Every send, top-up, or bill payment asks for /confirm before anything moves.'
   );
 });
@@ -404,6 +404,16 @@ bot.on('text', async (ctx) => {
       `Your Sendo wallet address:\n${account.address}\n` +
       (username ? `Your username: @${username}` : 'You haven\'t set a username yet — try /setusername')
     );
+    return;
+  }
+
+  if (intent.type === 'setusername') {
+    try {
+      const username = setUsername(ctx.from.id, intent.username);
+      ctx.reply(`✅ You're now @${username}. Others can send to you with "send [amount] to @${username}" or /send @${username} <amount>.`);
+    } catch (err) {
+      ctx.reply(err.message);
+    }
     return;
   }
 

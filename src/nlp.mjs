@@ -12,6 +12,7 @@ Buy airtime: {"type":"airtime","network":"<mtn|glo|airtel|9mobile>","phone":"<ph
 Pay a bill: {"type":"bill","disco":"<ikeja|eko|ibadan|kaduna|abuja|kano|enugu|portharcourt|aba>","meterType":"<prepaid|postpaid>","meterNumber":"<meter number>","amount":"<number as a string>","phone":"<phone number>"}
 Check balance: {"type":"balance"}
 Check wallet address: {"type":"wallet"}
+Set a username: {"type":"setusername","username":"<desired username, lowercase, no @ symbol>"}
 Unclear or missing required info: {"type":"unknown","reason":"<short reason, e.g. missing amount>"}
 
 Rules:
