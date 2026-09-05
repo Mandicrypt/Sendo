@@ -9,6 +9,7 @@ import { parseIntent } from './nlp.mjs';
 import { quoteTopup, executeTopup } from './swap.mjs';
 import { shortenError } from './errors.mjs';
 import { trackUser, startBalanceWatcher } from './notifications.mjs';
+import { generateReceipt } from './receipt.mjs';
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   throw new Error('Set TELEGRAM_BOT_TOKEN in your .env file — get one from @BotFather.');
@@ -56,6 +57,22 @@ function resolveRecipient(target) {
   }
   const account = walletForTelegramUser(ownerTelegramId);
   return { address: account.address, label: '@' + target.replace(/^@/, '') };
+}
+
+// Gates any real action behind having a username set — this is what
+// lets receipts show "@someone" instead of a raw wallet address, and
+// gives everyone a human-readable identity within Sendo. Never gates
+// /start, /setusername, /cancel, or /confirm themselves — a user must
+// always be able to learn about the bot or set a username in the first
+// place, and /confirm only fires on actions that were already vetted
+// when the pending action was created.
+function requireUsername(ctx) {
+  if (getUsernameFor(ctx.from.id)) return true;
+  ctx.reply(
+    "Before that, let's get you a username — it's what shows up on receipts instead of a long wallet address.\n\n" +
+    'Run /setusername <name> — e.g. /setusername chinedu_o'
+  );
+  return false;
 }
 
 function welcomeMessage() {
@@ -135,6 +152,7 @@ bot.command('cancel', (ctx) => {
 });
 
 bot.command('exportwallet', (ctx) => {
+  if (!requireUsername(ctx)) return;
   setPending(ctx.from.id, { type: 'exportwallet' });
   ctx.reply(
     '⚠️ This will send you your wallet\'s private key — the master password for everything in it.\n\n' +
@@ -148,6 +166,7 @@ bot.command('exportwallet', (ctx) => {
 });
 
 bot.command('topup', async (ctx) => {
+  if (!requireUsername(ctx)) return;
   const account = walletForTelegramUser(ctx.from.id);
 
   ctx.reply('Checking your stablecoin balances and current cNGN rates...');
@@ -175,6 +194,7 @@ bot.command('topup', async (ctx) => {
 });
 
 bot.command('send', (ctx) => {
+  if (!requireUsername(ctx)) return;
   const parts = ctx.message.text.split(' ').filter(Boolean);
   const [, target, amount] = parts;
 
@@ -189,7 +209,7 @@ bot.command('send', (ctx) => {
     return;
   }
 
-  setPending(ctx.from.id, { type: 'send', toAddress: recipient.address, amount });
+  setPending(ctx.from.id, { type: 'send', toAddress: recipient.address, label: recipient.label, amount });
   ctx.reply(
     `Confirm: send ${amount} cNGN to ${recipient.label}?\n` +
     'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
@@ -197,6 +217,7 @@ bot.command('send', (ctx) => {
 });
 
 bot.command('airtime', (ctx) => {
+  if (!requireUsername(ctx)) return;
   const parts = ctx.message.text.split(' ').filter(Boolean);
   const [, network, phone, amount] = parts;
 
@@ -213,6 +234,7 @@ bot.command('airtime', (ctx) => {
 });
 
 bot.command('bill', async (ctx) => {
+  if (!requireUsername(ctx)) return;
   const parts = ctx.message.text.split(' ').filter(Boolean);
   const [, disco, meterType, meterNumber, amount, phone] = parts;
 
@@ -279,6 +301,18 @@ bot.command('confirm', async (ctx) => {
         'kept back for future transaction fees.\n' +
         `Transaction: https://celoscan.io/tx/${swapHash}`
       );
+      const receipt = await generateReceipt({
+        title: 'Wallet Topped Up',
+        amount: pending.quote.quotedOutDisplay,
+        rows: [
+          { label: 'Converted From', value: `${pending.quote.amountToSwapDisplay} ${pending.quote.stableSymbol}` },
+          { label: 'Received', value: `NGN ${Number(pending.quote.quotedOutDisplay).toLocaleString('en-NG', { maximumFractionDigits: 2 })}` },
+          { label: 'Kept for Fees', value: `${pending.quote.reserveDisplay} ${pending.quote.stableSymbol}` },
+          { label: 'Status', value: 'Completed' },
+        ],
+        reference: swapHash.slice(2, 10),
+      });
+      await ctx.replyWithPhoto({ source: receipt }, { caption: 'Your receipt — save or forward this to anyone.' });
     } catch (err) {
       console.error(err);
       ctx.reply(
@@ -294,6 +328,18 @@ bot.command('confirm', async (ctx) => {
     try {
       const { hash } = await sendCngn({ account, toAddress: pending.toAddress, amount: pending.amount });
       ctx.reply(`✅ Sent! Transaction: https://celoscan.io/tx/${hash}`);
+      const receipt = await generateReceipt({
+        title: 'Money Sent',
+        amount: pending.amount,
+        rows: [
+          { label: 'From', value: '@' + getUsernameFor(ctx.from.id) },
+          { label: 'To', value: pending.label || pending.toAddress },
+          { label: 'Currency', value: 'cNGN' },
+          { label: 'Status', value: 'Completed' },
+        ],
+        reference: hash.slice(2, 10),
+      });
+      await ctx.replyWithPhoto({ source: receipt }, { caption: 'Your receipt — save or forward this to anyone.' });
     } catch (err) {
       console.error(err);
       ctx.reply(
@@ -329,6 +375,18 @@ bot.command('confirm', async (ctx) => {
         `Reference: ${result.transactionId}\n` +
         `On-chain payment: https://celoscan.io/tx/${onChainResult.hash}`
       );
+      const receipt = await generateReceipt({
+        title: 'Airtime Top-Up Successful',
+        amount: pending.amount,
+        rows: [
+          { label: 'Network', value: pending.network.toUpperCase() },
+          { label: 'Phone Number', value: pending.phone },
+          { label: 'Paid With', value: 'cNGN via Sendo' },
+          { label: 'Status', value: result.status || 'Delivered' },
+        ],
+        reference: result.transactionId || onChainResult.hash.slice(2, 10),
+      });
+      await ctx.replyWithPhoto({ source: receipt }, { caption: 'Your receipt — save or forward this to anyone.' });
     } catch (err) {
       console.error(err);
       ctx.reply(
@@ -370,6 +428,20 @@ bot.command('confirm', async (ctx) => {
         `Reference: ${result.transactionId}\n` +
         `On-chain payment: https://celoscan.io/tx/${onChainResult.hash}`
       );
+      const receiptRows = [
+        { label: 'Disco', value: pending.disco.charAt(0).toUpperCase() + pending.disco.slice(1) },
+        { label: 'Meter Number', value: pending.meterNumber },
+        { label: 'Meter Type', value: pending.meterType.charAt(0).toUpperCase() + pending.meterType.slice(1) },
+      ];
+      if (result.token) receiptRows.push({ label: 'Token', value: result.token });
+      receiptRows.push({ label: 'Status', value: result.status || 'Completed' });
+      const receipt = await generateReceipt({
+        title: 'Bill Payment Successful',
+        amount: pending.amount,
+        rows: receiptRows,
+        reference: result.transactionId || onChainResult.hash.slice(2, 10),
+      });
+      await ctx.replyWithPhoto({ source: receipt }, { caption: 'Your receipt — save or forward this to anyone.' });
     } catch (err) {
       console.error(err);
       ctx.reply(
@@ -452,12 +524,13 @@ bot.on('text', async (ctx) => {
   }
 
   if (intent.type === 'send') {
+    if (!requireUsername(ctx)) return;
     const recipient = resolveRecipient(intent.target);
     if (!recipient) {
       ctx.reply(`Couldn't find a user called "${intent.target}" — check the spelling, or use their full wallet address.`);
       return;
     }
-    setPending(ctx.from.id, { type: 'send', toAddress: recipient.address, amount: intent.amount });
+    setPending(ctx.from.id, { type: 'send', toAddress: recipient.address, label: recipient.label, amount: intent.amount });
     ctx.reply(
       `Confirm: send ${intent.amount} cNGN to ${recipient.label}?\n` +
       'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
@@ -466,6 +539,7 @@ bot.on('text', async (ctx) => {
   }
 
   if (intent.type === 'airtime') {
+    if (!requireUsername(ctx)) return;
     setPending(ctx.from.id, { type: 'airtime', network: intent.network, phone: intent.phone, amount: intent.amount });
     ctx.reply(
       `Confirm: buy ${intent.amount} cNGN worth of ${intent.network} airtime for ${intent.phone}?\n` +
@@ -475,6 +549,7 @@ bot.on('text', async (ctx) => {
   }
 
   if (intent.type === 'bill') {
+    if (!requireUsername(ctx)) return;
     let meterInfo;
     try {
       meterInfo = await verifyMeter({ disco: intent.disco, meterNumber: intent.meterNumber, meterType: intent.meterType });

@@ -1,0 +1,16 @@
+{
+  "name": "sendo",
+  "version": "0.1.0",
+  "description": "Telegram-based cNGN bill-pay and remittance agent on Celo, built for the Celo Agents at Work Hackathon.",
+  "type": "module",
+  "main": "src/bot.mjs",
+  "scripts": {
+    "start": "node src/bot.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "sharp": "^0.33.5",
+    "telegraf": "^4.16.3",
+    "viem": "^2.21.0"
+  }
+}
