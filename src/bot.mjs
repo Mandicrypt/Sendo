@@ -1,16 +1,27 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import { walletForTelegramUser } from './wallet.mjs';
-import { getCngnBalance, sendCngn } from './celo.mjs';
+import { getCngnBalance, getCusdBalance, getStableBalances, sendCngn } from './celo.mjs';
 import { buyAirtime, verifyMeter, payElectricity } from './vtpass.mjs';
 import { TREASURY_WALLET_ID } from './config.mjs';
 import { setUsername, resolveUsername, getUsernameFor } from './usernames.mjs';
+import { parseIntent } from './nlp.mjs';
+import { quoteTopup, executeTopup } from './swap.mjs';
+import { shortenError } from './errors.mjs';
+import { trackUser, startBalanceWatcher } from './notifications.mjs';
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   throw new Error('Set TELEGRAM_BOT_TOKEN in your .env file — get one from @BotFather.');
 }
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+
+// Every interaction registers the user for balance-change notifications —
+// this has to come before any command handlers so it runs on every message.
+bot.use((ctx, next) => {
+  if (ctx.from) trackUser(ctx.from.id);
+  return next();
+});
 
 // Every money-moving command builds an "action" here instead of running
 // immediately. Nothing actually happens until the user sends /confirm.
@@ -52,11 +63,13 @@ bot.start((ctx) => {
     "Welcome to Sendo — send and receive cNGN right here in Telegram, no CELO required for gas.\n\n" +
     'Commands:\n' +
     '/wallet — see your Sendo wallet address\n' +
-    '/balance — check your cNGN balance\n' +
+    '/balance — check your cNGN and cUSD balance\n' +
+    '/topup — deposited cUSD? Convert it to cNGN automatically\n' +
     '/setusername <name> — pick a username so others can send to you by name\n' +
     '/send <address or @username> <amount> — send cNGN\n' +
     '/airtime <network> <phone> <amount> — top up airtime (mtn, glo, airtel, 9mobile)\n' +
     '/bill <disco> <prepaid|postpaid> <meter> <amount> <phone> — pay an electricity bill\n\n' +
+    'Or just type what you want in plain English — "send 500 to @chinedu", "buy 200 naira MTN airtime for 08011111111", "pay my ikeja light bill, 2000, meter 1111111111111".\n\n' +
     'Every send, top-up, or bill payment asks for /confirm before anything moves.'
   );
 });
@@ -74,8 +87,17 @@ bot.command('wallet', (ctx) => {
 bot.command('balance', async (ctx) => {
   const account = walletForTelegramUser(ctx.from.id);
   try {
-    const balance = await getCngnBalance(account.address);
-    ctx.reply(`Your cNGN balance: ${balance}`);
+    const [cngnBalance, stables] = await Promise.all([
+      getCngnBalance(account.address),
+      getStableBalances(account.address),
+    ]);
+    const stablesLine = stables.map((s) => `Your ${s.symbol} balance: ${s.balance}`).join('\n');
+    const hasSpareStable = stables.some((s) => Number(s.balance) > 0.5);
+    ctx.reply(
+      `Your cNGN balance: ${cngnBalance}\n` +
+      stablesLine +
+      (hasSpareStable ? '\n\nHave a stablecoin you want converted to cNGN? Try /topup.' : '')
+    );
   } catch (err) {
     console.error(err);
     ctx.reply('Could not fetch your balance right now — try again in a moment.');
@@ -95,7 +117,7 @@ bot.command('setusername', (ctx) => {
     const username = setUsername(ctx.from.id, requested);
     ctx.reply(`✅ You're now @${username}. Others can send to you with /send @${username} <amount>.`);
   } catch (err) {
-    ctx.reply(err.message);
+    ctx.reply(shortenError(err));
   }
 });
 
@@ -105,6 +127,33 @@ bot.command('cancel', (ctx) => {
   } else {
     ctx.reply('Nothing pending to cancel.');
   }
+});
+
+bot.command('topup', async (ctx) => {
+  const account = walletForTelegramUser(ctx.from.id);
+
+  ctx.reply('Checking your stablecoin balances and current cNGN rates...');
+
+  let quote;
+  try {
+    quote = await quoteTopup(account);
+  } catch (err) {
+    console.error(err);
+    // quoteTopup throws its own clear, multi-line explanation (not a raw
+    // viem error), so show it in full rather than truncating with
+    // shortenError, which would hide exactly which stablecoin failed and why.
+    ctx.reply(err.message);
+    return;
+  }
+
+  setPending(ctx.from.id, { type: 'topup', quote });
+  ctx.reply(
+    `Deposit found: ${quote.amountToSwapDisplay} ${quote.stableSymbol}\n` +
+    `You'll get approximately: ${quote.quotedOutDisplay} cNGN\n` +
+    `Kept in reserve for fees: ${quote.reserveDisplay} ${quote.stableSymbol}\n\n` +
+    'Rates can shift slightly by the time this executes — you\'re protected up to 2% price movement.\n\n' +
+    'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
+  );
 });
 
 bot.command('send', (ctx) => {
@@ -170,7 +219,7 @@ bot.command('bill', async (ctx) => {
     meterInfo = await verifyMeter({ disco, meterNumber, meterType });
   } catch (err) {
     console.error(err);
-    ctx.reply("Couldn't verify that meter — double-check the number. Error: " + err.message);
+    ctx.reply("Couldn't verify that meter — double-check the number. Error: " + shortenError(err));
     return;
   }
 
@@ -192,6 +241,25 @@ bot.command('confirm', async (ctx) => {
 
   const account = walletForTelegramUser(ctx.from.id);
 
+  if (pending.type === 'topup') {
+    ctx.reply(`Swapping your ${pending.quote.stableSymbol} for cNGN...`);
+    try {
+      const { swapHash } = await executeTopup(account, pending.quote);
+      ctx.reply(
+        `✅ Swap complete! You now have cNGN in your wallet, with ${pending.quote.reserveDisplay} ${pending.quote.stableSymbol} ` +
+        'kept back for future transaction fees.\n' +
+        `Transaction: https://celoscan.io/tx/${swapHash}`
+      );
+    } catch (err) {
+      console.error(err);
+      ctx.reply(
+        "The swap didn't go through: " + shortenError(err) + '\n\n' +
+        `Your ${pending.quote.stableSymbol} should still be in your wallet — check /balance and try /topup again.`
+      );
+    }
+    return;
+  }
+
   if (pending.type === 'send') {
     ctx.reply(`Sending ${pending.amount} cNGN...`);
     try {
@@ -201,7 +269,7 @@ bot.command('confirm', async (ctx) => {
       console.error(err);
       ctx.reply(
         "That didn't go through — make sure your wallet has enough cNGN " +
-        '(and check /balance). Error: ' + err.message
+        '(and check /balance). Error: ' + shortenError(err)
       );
     }
     return;
@@ -218,7 +286,7 @@ bot.command('confirm', async (ctx) => {
       console.error(err);
       ctx.reply(
         "Couldn't move the funds — make sure your wallet has enough cNGN " +
-        '(and check /balance). Error: ' + err.message
+        '(and check /balance). Error: ' + shortenError(err)
       );
       return;
     }
@@ -236,7 +304,7 @@ bot.command('confirm', async (ctx) => {
       console.error(err);
       ctx.reply(
         'Your cNGN payment went through on-chain, but the airtime purchase itself failed: ' +
-        err.message +
+        shortenError(err) +
         '\n\nThis needs a manual refund for now — that flow isn\'t built yet.'
       );
     }
@@ -252,7 +320,7 @@ bot.command('confirm', async (ctx) => {
       console.error(err);
       ctx.reply(
         "Couldn't move the funds — make sure your wallet has enough cNGN " +
-        '(and check /balance). Error: ' + err.message
+        '(and check /balance). Error: ' + shortenError(err)
       );
       return;
     }
@@ -277,15 +345,119 @@ bot.command('confirm', async (ctx) => {
       console.error(err);
       ctx.reply(
         'Your cNGN payment went through on-chain, but the bill payment itself failed: ' +
-        err.message +
+        shortenError(err) +
         '\n\nThis needs a manual refund for now — that flow isn\'t built yet.'
       );
     }
   }
 });
 
+// Catches any message that isn't a recognized slash command and tries to
+// understand it as plain English. Deliberately reuses the exact same
+// setPending/confirm flow as the slash commands below — natural language
+// is just a second way to fill out the same action, never a shortcut
+// around confirmation.
+bot.on('text', async (ctx) => {
+  const text = ctx.message.text;
+  if (text.startsWith('/')) return; // an unrecognized command, not free text — leave it alone
+
+  let intent;
+  try {
+    intent = await parseIntent(text);
+  } catch (err) {
+    console.error(err);
+    ctx.reply("Couldn't process that right now: " + shortenError(err));
+    return;
+  }
+
+  if (intent.type === 'unknown') {
+    ctx.reply(
+      `I didn't quite catch that${intent.reason ? ' — ' + intent.reason : ''}.\n\n` +
+      'You can also use exact commands:\n' +
+      '/send <address or @username> <amount>\n' +
+      '/airtime <network> <phone> <amount>\n' +
+      '/bill <disco> <prepaid|postpaid> <meter> <amount> <phone>'
+    );
+    return;
+  }
+
+  if (intent.type === 'balance') {
+    const account = walletForTelegramUser(ctx.from.id);
+    try {
+      const [cngnBalance, stables] = await Promise.all([
+        getCngnBalance(account.address),
+        getStableBalances(account.address),
+      ]);
+      const stablesLine = stables.map((s) => `Your ${s.symbol} balance: ${s.balance}`).join('\n');
+      ctx.reply(`Your cNGN balance: ${cngnBalance}\n${stablesLine}`);
+    } catch (err) {
+      console.error(err);
+      ctx.reply('Could not fetch your balance right now — try again in a moment.');
+    }
+    return;
+  }
+
+  if (intent.type === 'wallet') {
+    const account = walletForTelegramUser(ctx.from.id);
+    const username = getUsernameFor(ctx.from.id);
+    ctx.reply(
+      `Your Sendo wallet address:\n${account.address}\n` +
+      (username ? `Your username: @${username}` : 'You haven\'t set a username yet — try /setusername')
+    );
+    return;
+  }
+
+  if (intent.type === 'send') {
+    const recipient = resolveRecipient(intent.target);
+    if (!recipient) {
+      ctx.reply(`Couldn't find a user called "${intent.target}" — check the spelling, or use their full wallet address.`);
+      return;
+    }
+    setPending(ctx.from.id, { type: 'send', toAddress: recipient.address, amount: intent.amount });
+    ctx.reply(
+      `Confirm: send ${intent.amount} cNGN to ${recipient.label}?\n` +
+      'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
+    );
+    return;
+  }
+
+  if (intent.type === 'airtime') {
+    setPending(ctx.from.id, { type: 'airtime', network: intent.network, phone: intent.phone, amount: intent.amount });
+    ctx.reply(
+      `Confirm: buy ${intent.amount} cNGN worth of ${intent.network} airtime for ${intent.phone}?\n` +
+      'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
+    );
+    return;
+  }
+
+  if (intent.type === 'bill') {
+    let meterInfo;
+    try {
+      meterInfo = await verifyMeter({ disco: intent.disco, meterNumber: intent.meterNumber, meterType: intent.meterType });
+    } catch (err) {
+      console.error(err);
+      ctx.reply("Couldn't verify that meter — double-check the number. Error: " + shortenError(err));
+      return;
+    }
+    setPending(ctx.from.id, {
+      type: 'bill',
+      disco: intent.disco,
+      meterType: intent.meterType,
+      meterNumber: intent.meterNumber,
+      amount: intent.amount,
+      phone: intent.phone,
+    });
+    ctx.reply(
+      `Meter verified: ${meterInfo.customerName}${meterInfo.customerAddress ? ' — ' + meterInfo.customerAddress : ''}\n\n` +
+      `Confirm: pay ${intent.amount} cNGN toward this bill?\n` +
+      'Reply /confirm to proceed, or /cancel. This expires in 2 minutes.'
+    );
+  }
+});
+
 bot.launch();
 console.log('Sendo is running.');
+startBalanceWatcher(bot);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
