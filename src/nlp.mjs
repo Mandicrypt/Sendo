@@ -13,6 +13,7 @@ Pay a bill: {"type":"bill","disco":"<ikeja|eko|ibadan|kaduna|abuja|kano|enugu|po
 Check balance: {"type":"balance"}
 Check wallet address: {"type":"wallet"}
 Set a username: {"type":"setusername","username":"<desired username, lowercase, no @ symbol>"}
+General greeting, "what can you do", or asking for help: {"type":"help"}
 Unclear or missing required info: {"type":"unknown","reason":"<short reason, e.g. missing amount>"}
 
 Rules:
@@ -20,7 +21,8 @@ Rules:
 - "light bill", "electric bill", "NEPA", "PHCN" all mean an electricity bill.
 - If no disco (electricity provider) is named, default disco to "ikeja" only if the user is clearly in Lagos; otherwise use "unknown".
 - Amounts are in cNGN (1 cNGN = 1 Naira). Strip currency symbols/words, keep just the number.
-- Never invent a phone number, meter number, or wallet address that wasn't in the message.`;
+- Never invent a phone number, meter number, or wallet address that wasn't in the message.
+- Use "help" for anything that's asking about the bot itself rather than asking it to do something — "hi", "what can you do", "help", "how does this work" all count.`;
 
 export async function parseIntent(message) {
   const apiKey = process.env.ANTHROPIC_API_KEY;

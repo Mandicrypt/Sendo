@@ -58,8 +58,8 @@ function resolveRecipient(target) {
   return { address: account.address, label: '@' + target.replace(/^@/, '') };
 }
 
-bot.start((ctx) => {
-  ctx.reply(
+function welcomeMessage() {
+  return (
     "Welcome to Sendo — send and receive cNGN right here in Telegram, no CELO required for gas.\n\n" +
     'Commands:\n' +
     '/wallet — see your Sendo wallet address\n' +
@@ -73,6 +73,10 @@ bot.start((ctx) => {
     'Or just type what you want in plain English — "send 500 to @chinedu", "buy 200 naira MTN airtime for 08011111111", "pay my ikeja light bill, 2000, meter 1111111111111", "set my username to chinedu_o".\n\n' +
     'Every send, top-up, or bill payment asks for /confirm before anything moves.'
   );
+}
+
+bot.start((ctx) => {
+  ctx.reply(welcomeMessage());
 });
 
 bot.command('wallet', (ctx) => {
@@ -392,6 +396,11 @@ bot.on('text', async (ctx) => {
   } catch (err) {
     console.error(err);
     ctx.reply("Couldn't process that right now: " + shortenError(err));
+    return;
+  }
+
+  if (intent.type === 'help') {
+    ctx.reply(welcomeMessage());
     return;
   }
 
