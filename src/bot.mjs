@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
-import { walletForTelegramUser } from './wallet.mjs';
+import { walletForTelegramUser, exportPrivateKeyForTelegramUser } from './wallet.mjs';
 import { getCngnBalance, getCusdBalance, getStableBalances, sendCngn } from './celo.mjs';
 import { buyAirtime, verifyMeter, payElectricity } from './vtpass.mjs';
 import { TREASURY_WALLET_ID } from './config.mjs';
@@ -65,6 +65,7 @@ bot.start((ctx) => {
     '/wallet — see your Sendo wallet address\n' +
     '/balance — check your cNGN and cUSD balance\n' +
     '/topup — deposited cUSD? Convert it to cNGN automatically\n' +
+    '/exportwallet — get your private key to use this wallet outside Sendo (e.g. to send cUSD or USDC directly)\n' +
     '/setusername <name> — pick a username so others can send to you by name\n' +
     '/send <address or @username> <amount> — send cNGN\n' +
     '/airtime <network> <phone> <amount> — top up airtime (mtn, glo, airtel, 9mobile)\n' +
@@ -127,6 +128,19 @@ bot.command('cancel', (ctx) => {
   } else {
     ctx.reply('Nothing pending to cancel.');
   }
+});
+
+bot.command('exportwallet', (ctx) => {
+  setPending(ctx.from.id, { type: 'exportwallet' });
+  ctx.reply(
+    '⚠️ This will send you your wallet\'s private key — the master password for everything in it.\n\n' +
+    'Anyone who sees this key can take everything in your wallet, permanently, with no way to reverse it. ' +
+    'Only continue if you\'re somewhere private, and delete the message as soon as you\'ve saved the key ' +
+    '(e.g. by importing it into MetaMask or another wallet app) somewhere safe.\n\n' +
+    'This is how you can move cUSD, USDC, or anything else Sendo doesn\'t have a command for — you always ' +
+    'have full access to your own funds outside of Sendo, whenever you want.\n\n' +
+    'Reply /confirm to receive it, or /cancel. This expires in 2 minutes.'
+  );
 });
 
 bot.command('topup', async (ctx) => {
@@ -238,6 +252,17 @@ bot.command('confirm', async (ctx) => {
     return;
   }
   pendingActions.delete(ctx.from.id);
+
+  if (pending.type === 'exportwallet') {
+    const privateKey = exportPrivateKeyForTelegramUser(ctx.from.id);
+    await ctx.reply(
+      `Your private key:\n\n\`${privateKey}\`\n\n` +
+      'Import this into MetaMask, Rabby, or any wallet app under "Import Account" / "Import Private Key" ' +
+      '— never type it into a website, never share it in any chat again, and delete this message once you\'ve saved it.',
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
 
   const account = walletForTelegramUser(ctx.from.id);
 

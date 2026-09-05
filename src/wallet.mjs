@@ -15,7 +15,7 @@
 import { createHmac } from 'node:crypto';
 import { privateKeyToAccount } from 'viem/accounts';
 
-export function walletForTelegramUser(telegramUserId) {
+function derivePrivateKey(telegramUserId) {
   const seed = process.env.WALLET_MASTER_SEED;
   if (!seed) {
     throw new Error('WALLET_MASTER_SEED is not set — check your .env file.');
@@ -25,6 +25,20 @@ export function walletForTelegramUser(telegramUserId) {
     .update(String(telegramUserId))
     .digest('hex');
 
-  const privateKey = `0x${derivedKey}`;
-  return privateKeyToAccount(privateKey);
+  return `0x${derivedKey}`;
+}
+
+export function walletForTelegramUser(telegramUserId) {
+  return privateKeyToAccount(derivePrivateKey(telegramUserId));
+}
+
+// Returns the raw private key so a user can import their Sendo wallet
+// into a normal wallet app (MetaMask, Rabby, etc.) and move funds out —
+// including tokens Sendo itself doesn't have a command for, like sending
+// cUSD or USDC directly. This is what makes the custodial model honest:
+// users aren't locked in, they can always leave with everything that's
+// theirs. Only ever call this from a flow the user explicitly confirmed —
+// see /exportwallet in bot.mjs.
+export function exportPrivateKeyForTelegramUser(telegramUserId) {
+  return derivePrivateKey(telegramUserId);
 }
