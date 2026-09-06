@@ -10,7 +10,7 @@
 // behalf — Sendo already controls the wallet's private key (see WALLET
 // SECURITY note in wallet.mjs), so no separate contract needs deploying.
 
-import { createWalletClient, http, parseUnits, formatUnits, encodePacked } from 'viem';
+import { createWalletClient, http, parseUnits, formatUnits, encodePacked, encodeAbiParameters, parseAbiParameters } from 'viem';
 import { celo } from 'viem/chains';
 import {
   RPC_URL,
@@ -32,6 +32,24 @@ import { withGasRetry } from './errors.mjs';
 const UNISWAP_V3_FACTORY = '0xAfE208a311B21f13EF87E33A90049fC17A7acDEc';
 const UNISWAP_V3_ROUTER = '0x5615CDAb10dc425a742d643d949a7F474C01abc4';
 const UNISWAP_V3_QUOTER = '0x82825d0554fA07f7FC52Ab63c961F330fdEFa8E8';
+
+// Direct single-hop swaps through the plain SwapRouter02 (exactInputSingle)
+// were found to fail with "STF" for the USDT/cNGN pool specifically, even
+// though the pool itself is healthy — Uniswap's own website swaps this
+// exact pair successfully, but through their Universal Router + Permit2
+// stack instead. This uses that same path rather than SwapRouter02 for
+// single-hop swaps.
+//
+// Address per Celo's own official docs (docs.celo.org) — noted here
+// because a real transaction we inspected went through a DIFFERENT
+// address than this one, and that discrepancy couldn't be fully resolved.
+// Treat this as the most authoritative source available, but the least
+// certain part of this integration — worth confirming with a small
+// amount before trusting it fully.
+const UNIVERSAL_ROUTER_ADDRESS = '0xcb695bc5d3aa22cad1e6df07801b061a05a0233a';
+const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+const V3_SWAP_EXACT_IN_COMMAND = '0x00';
+const UNIVERSAL_ROUTER_DEADLINE_SECONDS = 60 * 20; // 20 minutes
 
 // Stablecoins /topup will look for, in priority order — checked against
 // whichever one the user actually has a meaningful balance of.
@@ -219,6 +237,42 @@ const V2_ROUTER_ABI = [
   },
 ];
 
+// Permit2's own on-chain approve — separate from the standard ERC20
+// approve. This grants a specific spender (the Universal Router) an
+// allowance inside Permit2's own ledger, with an expiration timestamp.
+const PERMIT2_ABI = [
+  {
+    name: 'approve',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'spender', type: 'address' },
+      { name: 'amount', type: 'uint160' },
+      { name: 'expiration', type: 'uint48' },
+    ],
+    outputs: [],
+  },
+];
+
+// Universal Router's command-based execute function — verified against
+// Uniswap's own universal-router GitHub source. Commands are packed as
+// single bytes; each command's parameters are ABI-encoded separately
+// into the matching entry of the inputs array.
+const UNIVERSAL_ROUTER_ABI = [
+  {
+    name: 'execute',
+    type: 'function',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'commands', type: 'bytes' },
+      { name: 'inputs', type: 'bytes[]' },
+      { name: 'deadline', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+];
+
 let cachedAllowlistedFeeCurrencies = null;
 
 // Builds Uniswap's packed path format for a 2-hop swap: tokenIn, then the
@@ -276,7 +330,7 @@ async function findUbeswapV2Route(tokenAddress) {
 // both cNGN and the major stablecoins.
 async function findRoute(tokenAddress) {
   const directFee = await findUniswapV3Route(tokenAddress, CNGN_TOKEN_ADDRESS);
-  if (directFee !== null) return { dex: 'uniswap-v3', fee: directFee };
+  if (directFee !== null) return { dex: 'universal-router', fee: directFee };
 
   const ubeswapRoute = await findUbeswapV2Route(tokenAddress);
   if (ubeswapRoute) return ubeswapRoute;
@@ -359,7 +413,7 @@ export async function quoteTopup(account) {
   const amountToSwap = stable.balanceRaw - reserve;
 
   let quotedOut;
-  if (stable.route.dex === 'uniswap-v3') {
+  if (stable.route.dex === 'universal-router') {
     const [amountOut] = await publicClient.readContract({
       address: UNISWAP_V3_QUOTER,
       abi: UNISWAP_QUOTER_ABI,
@@ -432,6 +486,60 @@ export async function executeTopup(account, quote) {
   const amountOutMinimum =
     (quote.quotedOut * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000))) / 10000n;
 
+  // The Universal Router path needs a different, longer approval chain
+  // than the others (ERC20 → Permit2 → Universal Router, then the swap
+  // itself) — handled entirely separately rather than forcing it into
+  // the single-approve pattern the other routes share.
+  if (quote.route.dex === 'universal-router') {
+    const permit2ApproveHash = await withGasRetry(() =>
+      walletClient.writeContract({
+        address: quote.tokenAddress,
+        abi: ERC20_ABI,
+        functionName: 'approve',
+        args: [PERMIT2_ADDRESS, quote.amountToSwap],
+        feeCurrency: quote.feeCurrencyAddress,
+      })
+    );
+    await publicClient.waitForTransactionReceipt({ hash: permit2ApproveHash });
+
+    const expiration = Math.floor(Date.now() / 1000) + UNIVERSAL_ROUTER_DEADLINE_SECONDS;
+    const routerApproveHash = await withGasRetry(() =>
+      walletClient.writeContract({
+        address: PERMIT2_ADDRESS,
+        abi: PERMIT2_ABI,
+        functionName: 'approve',
+        args: [quote.tokenAddress, UNIVERSAL_ROUTER_ADDRESS, quote.amountToSwap, expiration],
+        feeCurrency: quote.feeCurrencyAddress,
+      })
+    );
+    await publicClient.waitForTransactionReceipt({ hash: routerApproveHash });
+
+    const path = encodePacked(
+      ['address', 'uint24', 'address'],
+      [quote.tokenAddress, quote.route.fee, CNGN_TOKEN_ADDRESS]
+    );
+    const swapInput = encodeAbiParameters(
+      parseAbiParameters('address, uint256, uint256, bytes, bool'),
+      [account.address, quote.amountToSwap, amountOutMinimum, path, true]
+    );
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + UNIVERSAL_ROUTER_DEADLINE_SECONDS);
+
+    const swapHash = await withGasRetry(() =>
+      walletClient.writeContract({
+        address: UNIVERSAL_ROUTER_ADDRESS,
+        abi: UNIVERSAL_ROUTER_ABI,
+        functionName: 'execute',
+        args: [V3_SWAP_EXACT_IN_COMMAND, [swapInput], deadline],
+        feeCurrency: quote.feeCurrencyAddress,
+      })
+    );
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: swapHash });
+    return { approveHash: permit2ApproveHash, swapHash, receipt };
+  }
+
+  // Uniswap V3 2-hop and Ubeswap V2 both use a single, simple approval
+  // directly to their own router — the pattern that's already proven
+  // reliable (this is how the successful cUSD 2-hop swap worked).
   const routerAddress = quote.route.dex === 'ubeswap-v2' ? UBESWAP_V2_ROUTER_ADDRESS : UNISWAP_V3_ROUTER;
 
   const approveHash = await withGasRetry(() =>
@@ -446,27 +554,7 @@ export async function executeTopup(account, quote) {
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
 
   let swapHash;
-  if (quote.route.dex === 'uniswap-v3') {
-    swapHash = await withGasRetry(() =>
-      walletClient.writeContract({
-        address: UNISWAP_V3_ROUTER,
-        abi: UNISWAP_ROUTER_ABI,
-        functionName: 'exactInputSingle',
-        args: [
-          {
-            tokenIn: quote.tokenAddress,
-            tokenOut: CNGN_TOKEN_ADDRESS,
-            fee: quote.route.fee,
-            recipient: account.address,
-            amountIn: quote.amountToSwap,
-            amountOutMinimum,
-            sqrtPriceLimitX96: sqrtPriceLimitFor(quote.tokenAddress, CNGN_TOKEN_ADDRESS),
-          },
-        ],
-        feeCurrency: quote.feeCurrencyAddress,
-      })
-    );
-  } else if (quote.route.dex === 'uniswap-v3-2hop') {
+  if (quote.route.dex === 'uniswap-v3-2hop') {
     const path = buildTwoHopPath(
       quote.tokenAddress,
       quote.route.fee1,
