@@ -517,9 +517,14 @@ export async function executeTopup(account, quote) {
       ['address', 'uint24', 'address'],
       [quote.tokenAddress, quote.route.fee, CNGN_TOKEN_ADDRESS]
     );
+    // The deployed router is V2.1.1 specifically — confirmed via
+    // @uniswap/universal-router-sdk's own version-specific command table
+    // (V2V3_SWAP_COMMANDS_V2_1_1), which adds a 6th field, minHopPriceX36
+    // (uint256[]), not present in earlier router versions. An empty array
+    // matches the SDK's own default when this feature isn't used.
     const swapInput = encodeAbiParameters(
-      parseAbiParameters('address, uint256, uint256, bytes, bool'),
-      [account.address, quote.amountToSwap, amountOutMinimum, path, true]
+      parseAbiParameters('address, uint256, uint256, bytes, bool, uint256[]'),
+      [account.address, quote.amountToSwap, amountOutMinimum, path, true, []]
     );
     const deadline = BigInt(Math.floor(Date.now() / 1000) + UNIVERSAL_ROUTER_DEADLINE_SECONDS);
 
