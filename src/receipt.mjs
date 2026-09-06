@@ -58,7 +58,7 @@ export async function generateReceipt({ title, amount, rows, reference }) {
 
   const width = 600;
   const rowHeight = 44;
-  const headerHeight = 330;
+  const headerHeight = 375;
   const footerHeight = 90;
   const height = headerHeight + rows.length * rowHeight + footerHeight;
 
