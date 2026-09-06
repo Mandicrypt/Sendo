@@ -45,6 +45,12 @@ const STABLE_CANDIDATES = [
 ];
 
 const DUST_THRESHOLD = 0.1; // ignore balances below this many whole tokens
+
+// How much of the deposited stablecoin to keep behind for future gas.
+// Real Celo gas costs are tiny (roughly 0.0001-0.001 per transaction) —
+// this is a comfortable buffer for many future transactions, not a
+// reflection of what gas actually costs.
+const TOPUP_GAS_RESERVE = '0.2';
 const SLIPPAGE_TOLERANCE = 0.02; // 2%
 const UNISWAP_FEE_TIERS = [100, 500, 3000, 10000];
 const V2_SWAP_DEADLINE_SECONDS = 60 * 10; // 10 minutes from execution
@@ -308,10 +314,10 @@ async function findUsableStable(walletAddress) {
 export async function quoteTopup(account) {
   const stable = await findUsableStable(account.address);
 
-  const reserve = parseUnits('0.5', stable.decimals);
+  const reserve = parseUnits(TOPUP_GAS_RESERVE, stable.decimals);
   if (stable.balanceRaw <= reserve) {
     throw new Error(
-      `Your ${stable.symbol} balance isn't enough to swap after keeping 0.5 ${stable.symbol} in reserve for future fees.`
+      `Your ${stable.symbol} balance isn't enough to swap after keeping ${TOPUP_GAS_RESERVE} ${stable.symbol} in reserve for future fees.`
     );
   }
   const amountToSwap = stable.balanceRaw - reserve;
@@ -364,7 +370,7 @@ export async function quoteTopup(account) {
     amountToSwapDisplay: formatUnits(amountToSwap, stable.decimals),
     quotedOut,
     quotedOutDisplay: formatUnits(quotedOut, cngnDecimals),
-    reserveDisplay: '0.5',
+    reserveDisplay: TOPUP_GAS_RESERVE,
   };
 }
 
