@@ -88,21 +88,40 @@ const UNISWAP_FACTORY_ABI = [
 
 const UNISWAP_QUOTER_ABI = [
   {
+    // Celo's Quoter address is actually QuoterV2, not the older "Quoter"
+    // contract most chains use at similar addresses — QuoterV2 takes one
+    // struct argument (with a different field order: amountIn before fee)
+    // instead of five separate arguments, and returns four values instead
+    // of one. Calling it with the wrong shape doesn't error clearly — it
+    // just reverts, since the function selector doesn't match anything.
     name: 'quoteExactInputSingle',
     type: 'function',
     stateMutability: 'nonpayable',
     inputs: [
-      { name: 'tokenIn', type: 'address' },
-      { name: 'tokenOut', type: 'address' },
-      { name: 'fee', type: 'uint24' },
-      { name: 'amountIn', type: 'uint256' },
-      { name: 'sqrtPriceLimitX96', type: 'uint160' },
+      {
+        name: 'params',
+        type: 'tuple',
+        components: [
+          { name: 'tokenIn', type: 'address' },
+          { name: 'tokenOut', type: 'address' },
+          { name: 'amountIn', type: 'uint256' },
+          { name: 'fee', type: 'uint24' },
+          { name: 'sqrtPriceLimitX96', type: 'uint160' },
+        ],
+      },
     ],
-    outputs: [{ name: 'amountOut', type: 'uint256' }],
+    outputs: [
+      { name: 'amountOut', type: 'uint256' },
+      { name: 'sqrtPriceX96After', type: 'uint160' },
+      { name: 'initializedTicksCrossed', type: 'uint32' },
+      { name: 'gasEstimate', type: 'uint256' },
+    ],
   },
   {
     // Multi-hop version — path is the packed-encoded sequence of
     // token/fee/token/fee/token, same format Uniswap's own UI produces.
+    // This signature is unchanged between Quoter and QuoterV2 — only
+    // the single-hop version differs.
     name: 'quoteExactInput',
     type: 'function',
     stateMutability: 'nonpayable',
@@ -341,18 +360,21 @@ export async function quoteTopup(account) {
 
   let quotedOut;
   if (stable.route.dex === 'uniswap-v3') {
-    quotedOut = await publicClient.readContract({
+    const [amountOut] = await publicClient.readContract({
       address: UNISWAP_V3_QUOTER,
       abi: UNISWAP_QUOTER_ABI,
       functionName: 'quoteExactInputSingle',
       args: [
-        stable.address,
-        CNGN_TOKEN_ADDRESS,
-        stable.route.fee,
-        amountToSwap,
-        sqrtPriceLimitFor(stable.address, CNGN_TOKEN_ADDRESS),
+        {
+          tokenIn: stable.address,
+          tokenOut: CNGN_TOKEN_ADDRESS,
+          amountIn: amountToSwap,
+          fee: stable.route.fee,
+          sqrtPriceLimitX96: sqrtPriceLimitFor(stable.address, CNGN_TOKEN_ADDRESS),
+        },
       ],
     });
+    quotedOut = amountOut;
   } else if (stable.route.dex === 'uniswap-v3-2hop') {
     const path = buildTwoHopPath(
       stable.address,
