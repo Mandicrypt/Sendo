@@ -51,6 +51,23 @@ const DUST_THRESHOLD = 0.1; // ignore balances below this many whole tokens
 // this is a comfortable buffer for many future transactions, not a
 // reflection of what gas actually costs.
 const TOPUP_GAS_RESERVE = '0.2';
+
+// Uniswap V3's actual MIN/MAX sqrt price ratio constants (from TickMath.sol).
+// Passing plain 0 for sqrtPriceLimitX96 is a common mistake — it only
+// happens to work for ONE of the two swap directions. For the other
+// direction, the pool's own safety check requires the limit to be
+// strictly greater than MIN_SQRT_RATIO, and 0 fails that, reverting
+// with "SPL". Always compute the correct one instead of guessing.
+const MIN_SQRT_RATIO_PLUS_ONE = 4295128740n;
+const MAX_SQRT_RATIO_MINUS_ONE = 1461446703485210103287273052203988822378723970341n;
+
+// Uniswap V3 pools always order their two tokens by address — the lower
+// address is "token0". Swapping token0 for token1 ("zeroForOne") needs
+// the MIN-side limit; the reverse needs the MAX-side limit.
+function sqrtPriceLimitFor(tokenIn, tokenOut) {
+  const zeroForOne = tokenIn.toLowerCase() < tokenOut.toLowerCase();
+  return zeroForOne ? MIN_SQRT_RATIO_PLUS_ONE : MAX_SQRT_RATIO_MINUS_ONE;
+}
 const SLIPPAGE_TOLERANCE = 0.02; // 2%
 const UNISWAP_FEE_TIERS = [100, 500, 3000, 10000];
 const V2_SWAP_DEADLINE_SECONDS = 60 * 10; // 10 minutes from execution
@@ -328,7 +345,13 @@ export async function quoteTopup(account) {
       address: UNISWAP_V3_QUOTER,
       abi: UNISWAP_QUOTER_ABI,
       functionName: 'quoteExactInputSingle',
-      args: [stable.address, CNGN_TOKEN_ADDRESS, stable.route.fee, amountToSwap, 0n],
+      args: [
+        stable.address,
+        CNGN_TOKEN_ADDRESS,
+        stable.route.fee,
+        amountToSwap,
+        sqrtPriceLimitFor(stable.address, CNGN_TOKEN_ADDRESS),
+      ],
     });
   } else if (stable.route.dex === 'uniswap-v3-2hop') {
     const path = buildTwoHopPath(
@@ -415,7 +438,7 @@ export async function executeTopup(account, quote) {
             recipient: account.address,
             amountIn: quote.amountToSwap,
             amountOutMinimum,
-            sqrtPriceLimitX96: 0n,
+            sqrtPriceLimitX96: sqrtPriceLimitFor(quote.tokenAddress, CNGN_TOKEN_ADDRESS),
           },
         ],
         feeCurrency: quote.feeCurrencyAddress,

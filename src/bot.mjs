@@ -176,10 +176,11 @@ bot.command('topup', async (ctx) => {
     quote = await quoteTopup(account);
   } catch (err) {
     console.error(err);
-    // quoteTopup throws its own clear, multi-line explanation (not a raw
-    // viem error), so show it in full rather than truncating with
-    // shortenError, which would hide exactly which stablecoin failed and why.
-    ctx.reply(err.message);
+    // quoteTopup usually throws its own clear, multi-line explanation
+    // (not a raw viem error) — show that in full. But if something
+    // unexpected comes from viem itself (which attaches a clean
+    // .shortMessage), prefer that over the full multi-paragraph dump.
+    ctx.reply(err.shortMessage || err.message);
     return;
   }
 
