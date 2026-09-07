@@ -335,14 +335,19 @@ async function findUbeswapV2Route(tokenAddress) {
   return null;
 }
 
-// Checks, in order: a direct Uniswap pool, a direct Ubeswap pool, and —
-// for anything that isn't USDT itself — a 2-hop Uniswap route bridged
-// through USDT, since that's where confirmed liquidity exists against
-// both cNGN and the major stablecoins.
+// Checks, in order: a direct Ubeswap pool, and — for anything that isn't
+// USDT itself — a 2-hop Uniswap route bridged through USDT, since that's
+// where confirmed, PROVEN-WORKING liquidity exists.
+//
+// Deliberately NOT checking for a direct single-hop Uniswap route here,
+// even though a real, deep USDT/cNGN pool exists on Uniswap — five
+// separate real-money attempts at calling it directly (via SwapRouter02,
+// then Universal Router with several different command structures) all
+// failed with different, hard-to-diagnose errors. Rather than keep
+// guessing with real funds, USDT is routed through the proven-working
+// path instead: swap USDT→cUSD manually (e.g. on app.uniswap.org), then
+// /topup with the resulting cUSD, which uses the reliable 2-hop bridge.
 async function findRoute(tokenAddress) {
-  const directFee = await findUniswapV3Route(tokenAddress, CNGN_TOKEN_ADDRESS);
-  if (directFee !== null) return { dex: 'universal-router', fee: directFee };
-
   const ubeswapRoute = await findUbeswapV2Route(tokenAddress);
   if (ubeswapRoute) return ubeswapRoute;
 
@@ -364,6 +369,7 @@ async function findRoute(tokenAddress) {
 async function findUsableStable(walletAddress) {
   const allowlisted = await getAllowlistedFeeCurrencies();
   const attempts = [];
+  let usdtHasBalanceButNoRoute = false;
 
   for (const candidate of STABLE_CANDIDATES) {
     const decimals = await publicClient.readContract({
@@ -387,6 +393,7 @@ async function findUsableStable(walletAddress) {
     const route = await findRoute(candidate.address);
     if (!route) {
       attempts.push(`${candidate.symbol}: balance found (${balanceDisplay}), but no direct or USDT-bridged cNGN route exists yet`);
+      if (candidate.symbol === 'USDT') usdtHasBalanceButNoRoute = true;
       continue;
     }
 
@@ -403,6 +410,13 @@ async function findUsableStable(walletAddress) {
   // never shown to the user, who doesn't need to know about DEXs, pools,
   // or fee-currency adapters.
   console.error('No usable stablecoin for /topup. Details:\n' + attempts.join('\n'));
+
+  if (usdtHasBalanceButNoRoute) {
+    throw new Error(
+      "We found USDT in your wallet, but can't convert it directly yet. " +
+      'For now: swap your USDT to cUSD on app.uniswap.org, then run /topup again with the cUSD.'
+    );
+  }
 
   throw new Error(
     "We couldn't find cUSD, USDT, or USDC in your wallet to convert yet. " +
