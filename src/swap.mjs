@@ -67,7 +67,13 @@ const DUST_THRESHOLD = 0.1; // ignore balances below this many whole tokens
 // Real Celo gas costs are tiny (roughly 0.0001-0.001 per transaction) —
 // this is a comfortable buffer for many future transactions, not a
 // reflection of what gas actually costs.
-const TOPUP_GAS_RESERVE = '0.2';
+// How much of the deposited stablecoin to keep behind for future gas.
+// Started at 0.2, based on a simple transfer's real cost (~0.002 USDT
+// seen on Celoscan) — but the swap itself is a much heavier call
+// (Permit2 transfer + pool swap + callback, all in one transaction),
+// and its own gas reservation competes with the transfer amount within
+// that same transaction. 0.2 wasn't leaving enough headroom for that.
+const TOPUP_GAS_RESERVE = '0.4';
 
 // Uniswap V3's actual MIN/MAX sqrt price ratio constants (from TickMath.sol).
 // Passing plain 0 for sqrtPriceLimitX96 is a common mistake — it only
