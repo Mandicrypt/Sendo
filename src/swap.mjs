@@ -48,6 +48,12 @@ const UNISWAP_V3_QUOTER = '0x82825d0554fA07f7FC52Ab63c961F330fdEFa8E8';
 const UNIVERSAL_ROUTER_ADDRESS = '0x8B844f885672f333Bc0042cB669255f93a4C1E6b';
 const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
 const V3_SWAP_EXACT_IN_COMMAND = '0x00';
+const PERMIT2_TRANSFER_FROM_COMMAND = '0x02';
+// Uniswap's convention: address(2) as a recipient means "the router itself,"
+// used to stage tokens inside the router before a swap that reads from its
+// own balance (payerIsUser: false) instead of pulling from the user at
+// swap time (payerIsUser: true).
+const ROUTER_AS_RECIPIENT = '0x0000000000000000000000000000000000000002';
 const UNIVERSAL_ROUTER_DEADLINE_SECONDS = 60 * 20; // 20 minutes
 
 // Stablecoins /topup will look for, in priority order — checked against
@@ -523,23 +529,36 @@ export async function executeTopup(account, quote) {
       ['address', 'uint24', 'address'],
       [quote.tokenAddress, quote.route.fee, CNGN_TOKEN_ADDRESS]
     );
-    // The deployed router is V2.1.1 specifically — confirmed via
-    // @uniswap/universal-router-sdk's own version-specific command table
-    // (V2V3_SWAP_COMMANDS_V2_1_1), which adds a 6th field, minHopPriceX36
-    // (uint256[]), not present in earlier router versions. An empty array
-    // matches the SDK's own default when this feature isn't used.
+
+    // Two-command approach: first explicitly move tokens from the user
+    // into the router itself (via Permit2), then swap using the router's
+    // own balance (payerIsUser: false) instead of trying to pull from the
+    // user again at swap time. This is a documented alternative to the
+    // single-command payerIsUser:true approach, and sidesteps whatever
+    // was causing that approach to fail here.
+    const transferInput = encodeAbiParameters(
+      parseAbiParameters('address, address, uint160'),
+      [quote.tokenAddress, ROUTER_AS_RECIPIENT, quote.amountToSwap]
+    );
+
+    // Same 6-field V2.1.1 format as before, but payerIsUser is now false —
+    // the router already holds the tokens from the transfer command above.
     const swapInput = encodeAbiParameters(
       parseAbiParameters('address, uint256, uint256, bytes, bool, uint256[]'),
-      [account.address, quote.amountToSwap, amountOutMinimum, path, true, []]
+      [account.address, quote.amountToSwap, amountOutMinimum, path, false, []]
     );
     const deadline = BigInt(Math.floor(Date.now() / 1000) + UNIVERSAL_ROUTER_DEADLINE_SECONDS);
+
+    // Commands are executed in the order their bytes appear: transfer-in
+    // first (0x02), then the swap (0x00).
+    const commands = `${PERMIT2_TRANSFER_FROM_COMMAND}${V3_SWAP_EXACT_IN_COMMAND.slice(2)}`;
 
     const swapHash = await withGasRetry(() =>
       walletClient.writeContract({
         address: UNIVERSAL_ROUTER_ADDRESS,
         abi: UNIVERSAL_ROUTER_ABI,
         functionName: 'execute',
-        args: [V3_SWAP_EXACT_IN_COMMAND, [swapInput], deadline],
+        args: [commands, [transferInput, swapInput], deadline],
         feeCurrency: quote.feeCurrencyAddress,
       })
     );
