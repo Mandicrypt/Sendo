@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import { walletForTelegramUser, exportPrivateKeyForTelegramUser } from './wallet.mjs';
 import { getCngnBalance, getCusdBalance, getStableBalances, sendCngn } from './celo.mjs';
-import { buyAirtime, verifyMeter, payElectricity } from './vtpass.mjs';
+import { buyAirtime, verifyMeter, payElectricity, VALID_AIRTIME_NETWORKS } from './vtpass.mjs';
 import { TREASURY_WALLET_ID } from './config.mjs';
 import { setUsername, resolveUsername, getUsernameFor } from './usernames.mjs';
 import { parseIntent } from './nlp.mjs';
@@ -224,6 +224,11 @@ bot.command('airtime', (ctx) => {
 
   if (!network || !phone || !amount) {
     ctx.reply('Usage: /airtime <network> <phone> <amount>\nExample: /airtime mtn 08011111111 500');
+    return;
+  }
+
+  if (!VALID_AIRTIME_NETWORKS.includes(network.toLowerCase())) {
+    ctx.reply(`Unknown network "${network}". Use one of: ${VALID_AIRTIME_NETWORKS.join(', ')}.`);
     return;
   }
 
@@ -541,6 +546,10 @@ bot.on('text', async (ctx) => {
 
   if (intent.type === 'airtime') {
     if (!requireUsername(ctx)) return;
+    if (!VALID_AIRTIME_NETWORKS.includes((intent.network || '').toLowerCase())) {
+      ctx.reply(`I couldn't tell which network you meant — please say one of: ${VALID_AIRTIME_NETWORKS.join(', ')}.`);
+      return;
+    }
     setPending(ctx.from.id, { type: 'airtime', network: intent.network, phone: intent.phone, amount: intent.amount });
     ctx.reply(
       `Confirm: buy ${intent.amount} cNGN worth of ${intent.network} airtime for ${intent.phone}?\n` +

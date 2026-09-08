@@ -49,6 +49,8 @@ const AIRTIME_SERVICE_IDS = {
   '9mobile': 'etisalat',
 };
 
+export const VALID_AIRTIME_NETWORKS = Object.keys(AIRTIME_SERVICE_IDS);
+
 export async function buyAirtime({ network, phone, amount }) {
   const serviceID = AIRTIME_SERVICE_IDS[network.toLowerCase()];
   if (!serviceID) {

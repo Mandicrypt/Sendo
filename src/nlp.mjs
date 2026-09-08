@@ -17,9 +17,9 @@ General greeting, "what can you do", or asking for help: {"type":"help"}
 Unclear or missing required info: {"type":"unknown","reason":"<short reason, e.g. missing amount>"}
 
 Rules:
-- If any required field for a type is missing or ambiguous, use "unknown" and say what's missing in "reason" — never guess a value.
+- If any required field for a type is missing or ambiguous, respond with the top-level {"type":"unknown","reason":"..."} shape instead — never put a placeholder word like "unknown" as the VALUE of a field inside another type (e.g. never {"type":"airtime","network":"unknown",...} or {"type":"bill","disco":"unknown",...}). If you can't confidently fill in every required field, the whole response must be {"type":"unknown", ...}.
 - "light bill", "electric bill", "NEPA", "PHCN" all mean an electricity bill.
-- If no disco (electricity provider) is named, default disco to "ikeja" only if the user is clearly in Lagos; otherwise use "unknown".
+- If no disco (electricity provider) is named, default disco to "ikeja" only if the user is clearly in Lagos; otherwise respond with {"type":"unknown","reason":"which electricity provider (disco)?"}.
 - Amounts are in cNGN (1 cNGN = 1 Naira). Strip currency symbols/words, keep just the number.
 - Never invent a phone number, meter number, or wallet address that wasn't in the message.
 - Use "help" for anything that's asking about the bot itself rather than asking it to do something — "hi", "what can you do", "help", "how does this work" all count.`;
